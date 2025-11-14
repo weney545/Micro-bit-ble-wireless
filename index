@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>micro:bit Accelerometer Data Logger</title>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; margin-top: 20px; }
+        #chartContainer { width: 80%; margin: 30px auto; }
+        canvas { border: 1px solid #ccc; border-radius: 5px; }
+        button { padding: 10px 20px; margin: 5px; cursor: pointer; }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+    <h1>micro:bit Real-time Accelerometer Logger</h1>
+    <button id="connectButton">Connect to micro:bit</button>
+    <button id="saveButton" disabled>Save Data (CSV)</button>
+    <p id="status">Status: Disconnected</p>
+
+    <div id="chartContainer">
+        <canvas id="accelChart"></canvas>
+    </div>
+    
+    <script>
+        // UUIDs remain the same
+        const UART_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+        const TX_CHARACTERISTIC_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; 
+        
+        let microbitDevice;
+        let txCharacteristic;
+        let accelChart;
+        const MAX_DATA_POINTS = 50; 
+        
+        // **NEW:** Array to store all incoming data points
+        const dataLog = []; 
+        let currentDataPoint = {}; // Temporary object to hold X, Y, Z for one timestamp
+
+        // --- Chart Initialization (Same as before) ---
+        document.addEventListener('DOMContentLoaded', () => {
+            // ... (Chart.js setup code remains the same) ...
+            const ctx = document.getElementById('accelChart').getContext('2d');
+            accelChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [
+                        { label: 'X-axis', data: [], borderColor: 'rgb(255, 99, 132)', tension: 0.1, pointRadius: 0 },
+                        { label: 'Y-axis', data: [], borderColor: 'rgb(54, 162, 235)', tension: 0.1, pointRadius: 0 },
+                        { label: 'Z-axis', data: [], borderColor: 'rgb(75, 192, 192)', tension: 0.1, pointRadius: 0 }
+                    ]
+                },
+                options: {
+                    animation: false, 
+                    responsive: true,
+                    scales: {
+                        y: { min: -2000, max: 2000, title: { display: true, text: 'Acceleration (mg)' } }
+                    },
+                    plugins: { legend: { display: true } }
+                }
+            });
+            document.getElementById('saveButton').addEventListener('click', downloadLog);
+        });
+
+        // --- Bluetooth Utility Functions (Same as before) ---
+        function decodeUartData(value) {
+            return new TextDecoder('utf-8').decode(value);
+        }
+
+        // --- Data Logging and Chart Update Logic (Modified) ---
+        function updateChartAndLog(label, dataValue) {
+            const chartData = accelChart.data;
+            const now = new Date();
+            const timeLabel = `${now.getHours()}:${now.getMinutes()}:${now.getSeconds()}.${String(now.getMilliseconds()).padStart(3, '0')}`;
+            const accelValue = parseInt(dataValue, 10);
+            
+            let datasetIndex = -1;
+            let logKey = ''; // Key for the log object
+
+            // Map the label
+            if (label === 'x' || label === 'a.x') {
+                datasetIndex = 0; logKey = 'X';
+            } else if (label === 'y' || label === 'a.y') {
+                datasetIndex = 1; logKey = 'Y';
+            } else if (label === 'z' || label === 'a.z') {
+                datasetIndex = 2; logKey = 'Z';
+            }
+
+            if (datasetIndex !== -1) {
+                // **STEP 1: Log the Data**
+                currentDataPoint[logKey] = accelValue;
+
+                // We consider a data point "complete" and ready to be logged when we receive the Z-axis data
+                if (logKey === 'Z') {
+                    // Create a final log entry with a precise timestamp
+                    const finalLogEntry = {
+                        Timestamp: now.toISOString(),
+                        X: currentDataPoint.X || 0, // Use 0 if the X/Y values weren't received yet
+                        Y: currentDataPoint.Y || 0,
+                        Z: accelValue
+                    };
+                    dataLog.push(finalLogEntry);
+                    currentDataPoint = {}; // Reset for the next batch of readings
+
+                    // **STEP 2: Update the Chart (Only when a complete Z reading is logged)**
+                    chartData.labels.push(timeLabel);
+                    chartData.datasets[0].data.push(finalLogEntry.X);
+                    chartData.datasets[1].data.push(finalLogEntry.Y);
+                    chartData.datasets[2].data.push(finalLogEntry.Z);
+                    
+                    // Maintain the max data points for the visible graph
+                    if (chartData.labels.length > MAX_DATA_POINTS) {
+                        chartData.labels.shift();
+                        chartData.datasets.forEach(dataset => dataset.data.shift());
+                    }
+                    
+                    accelChart.update('none'); 
+                }
+            }
+        }
+
+        function handleNotifications(event) {
+            const value = event.target.value;
+            const text = decodeUartData(value).trim();
+            
+            const parts = text.split(':');
+            if (parts.length === 2) {
+                const label = parts[0].trim();
+                const dataValue = parts[1].trim();
+
+                updateChartAndLog(label, dataValue);
+            }
+        }
+        
+        // --- Connection/Disconnection Functions (Updated to handle Save Button) ---
+        async function connectMicrobit() {
+            // ... (Connection code remains similar) ...
+             try {
+                document.getElementById('status').textContent = "Status: Connecting...";
+                
+                microbitDevice = await navigator.bluetooth.requestDevice({
+                    filters: [{ services: [UART_SERVICE_UUID] }],
+                });
+
+                microbitDevice.addEventListener('gattserverdisconnected', onDisconnected);
+
+                const server = await microbitDevice.gatt.connect();
+                const service = await server.getPrimaryService(UART_SERVICE_SERVICE_UUID);
+                txCharacteristic = await service.getCharacteristic(TX_CHARACTERISTIC_UUID);
+
+                await txCharacteristic.startNotifications();
+                txCharacteristic.addEventListener('characteristicvaluechanged', handleNotifications);
+
+                document.getElementById('status').textContent = "Status: Connected! Streaming Data...";
+                document.getElementById('connectButton').textContent = "Disconnect";
+                document.getElementById('connectButton').removeEventListener('click', connectMicrobit);
+                document.getElementById('connectButton').addEventListener('click', disconnectMicrobit);
+                document.getElementById('saveButton').disabled = false; // **Enable Save button**
+
+            } catch(error) {
+                console.error('Bluetooth Error:', error);
+                document.getElementById('status').textContent = `Status: Error - ${error.message}`;
+            }
+        }
+
+        function onDisconnected(event) {
+            // ... (Disconnection code remains similar) ...
+            document.getElementById('status').textContent = "Status: Disconnected";
+            document.getElementById('connectButton').textContent = "Connect to micro:bit";
+            document.getElementById('connectButton').removeEventListener('click', disconnectMicrobit);
+            document.getElementById('connectButton').addEventListener('click', connectMicrobit);
+            document.getElementById('saveButton').disabled = true; // **Disable Save button**
+            
+            // Clear chart display
+            accelChart.data.datasets.forEach(dataset => dataset.data.length = 0);
+            accelChart.data.labels.length = 0;
+            accelChart.update();
+            console.log('micro:bit disconnected.', event.target.name);
+        }
+
+        function disconnectMicrobit() {
+            if (microbitDevice && microbitDevice.gatt.connected) {
+                microbitDevice.gatt.disconnect();
+            }
+        }
+        
+        // **NEW: Data Download Function**
+        function downloadLog() {
+            if (dataLog.length === 0) {
+                alert("No data recorded yet!");
+                return;
+            }
+
+            // 1. Create the CSV header
+            const header = "Timestamp,X,Y,Z\n";
+            
+            // 2. Map dataLog array to CSV rows
+            const csvRows = dataLog.map(d => 
+                `${d.Timestamp},${d.X},${d.Y},${d.Z}`
+            );
+
+            // 3. Combine header and rows
+            const csvContent = header + csvRows.join('\n');
+            
+            // 4. Create a Blob (a file-like object)
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            
+            // 5. Create a temporary anchor element for the download
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            
+            a.setAttribute('href', url);
+            // Set the filename
+            a.setAttribute('download', `microbit_accel_log_${new Date().toISOString().slice(0, 10)}.csv`);
+            
+            // 6. Trigger the download and clean up
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            
+            alert(`Data saved! ${dataLog.length} readings recorded.`);
+        }
+        
+    </script>
+</body>
+</html>
